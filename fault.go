@@ -7,11 +7,8 @@ import (
 	"time"
 )
 
-var r *rand.Rand
-var mu sync.Mutex
-
-func init() {
-	r = rand.New(rand.NewSource(time.Now().UnixNano()))
+type Fault interface {
+	Handle(w http.ResponseWriter, r *http.Request)
 }
 
 // decide decides if fault should be injected based on the provided ratio.
@@ -19,6 +16,33 @@ func decide(ratio float64) bool {
 	mu.Lock()
 	defer mu.Unlock()
 	return r.Float64() < ratio
+}
+
+type Handler struct {
+	f           Fault
+	RandomRatio float64
+
+	r  *rand.Rand
+	mu sync.Mutex
+}
+
+func New(f Fault, randomRatio float64) *Handler {
+	return &Handler{
+		f:           f,
+		RandomRatio: randomRatio,
+		r:           rand.New(rand.NewSource(time.Now().UnixNano())),
+	}
+}
+
+func (h *Handler) Handler(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Float64() < f.RandomRatio {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		h.f.Handle(w, R)
+	})
 }
 
 // Delay injects delay in the server call.
@@ -34,31 +58,25 @@ type Delay struct {
 	// For example, you can use it to make sure your server's idempotency.
 	// If false, the delay is added before server call; request comes in, sleep, proxied to next, return response.
 	Afterward bool
-	// Random Ratio is the float64 number which is used to decide if delay should be added.
-	// It should be between 0 and 1, but less than 0 or bigger than 1 does not give error.
-	// Simply, if RandomRatio >= 1.0, then the delay injection rate will be 100%.
-	RandomRatio float64
 }
 
 // Handler adds delay to the given handler.
-func (f *Delay) Handler(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !decide(f.RandomRatio) {
-			next.ServeHTTP(w, r)
-			return
-		}
-
-		// If Afterward is true, proxy -> sleep
-		if f.Afterward {
-			next.ServeHTTP(w, r)
-			time.Sleep(f.Duration)
-			return
-		}
-
-		// else, sleep -> proxy
-		time.Sleep(f.Duration)
+func (f *Delay) Handle(w http.ResponseWriter, r *http.Request) {
+	if !decide(f.RandomRatio) {
 		next.ServeHTTP(w, r)
-	})
+		return
+	}
+
+	// If Afterward is true, proxy -> sleep
+	if f.Afterward {
+		next.ServeHTTP(w, r)
+		time.Sleep(f.Duration)
+		return
+	}
+
+	// else, sleep -> proxy
+	time.Sleep(f.Duration)
+	next.ServeHTTP(w, r)
 }
 
 // Error injects arbitrary status code in the server call.
