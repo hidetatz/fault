@@ -8,14 +8,15 @@ import (
 )
 
 type Fault interface {
-	Handle(w http.ResponseWriter, r *http.Request)
+	Handler(next http.Handler) http.Handler
 }
 
-// decide decides if fault should be injected based on the provided ratio.
-func decide(ratio float64) bool {
-	mu.Lock()
-	defer mu.Unlock()
-	return r.Float64() < ratio
+var _ []Fault = []Fault{
+	&Delay{},
+	&Error{},
+	&DelayWithError{},
+	&Abort{},
+	&DelayWithAbort{},
 }
 
 type Handler struct {
@@ -36,12 +37,12 @@ func New(f Fault, randomRatio float64) *Handler {
 
 func (h *Handler) Handler(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Float64() < f.RandomRatio {
+		if h.r.Float64() < h.RandomRatio {
 			next.ServeHTTP(w, r)
 			return
 		}
 
-		h.f.Handle(w, R)
+		h.f.Handler(next).ServeHTTP(w, r)
 	})
 }
 
@@ -61,22 +62,19 @@ type Delay struct {
 }
 
 // Handler adds delay to the given handler.
-func (f *Delay) Handle(w http.ResponseWriter, r *http.Request) {
-	if !decide(f.RandomRatio) {
-		next.ServeHTTP(w, r)
-		return
-	}
+func (f *Delay) Handler(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// If Afterward is true, proxy -> sleep
+		if f.Afterward {
+			next.ServeHTTP(w, r)
+			time.Sleep(f.Duration)
+			return
+		}
 
-	// If Afterward is true, proxy -> sleep
-	if f.Afterward {
-		next.ServeHTTP(w, r)
+		// else, sleep -> proxy
 		time.Sleep(f.Duration)
-		return
-	}
-
-	// else, sleep -> proxy
-	time.Sleep(f.Duration)
-	next.ServeHTTP(w, r)
+		next.ServeHTTP(w, r)
+	})
 }
 
 // Error injects arbitrary status code in the server call.
@@ -91,20 +89,11 @@ type Error struct {
 	StatusCode int
 	// StatusText is used as HTTP response body. Optional but if empty, a placeholder message is used.
 	StatusText string
-	// Random Ratio is the float64 number which is used to decide if delay should be added.
-	// It should be between 0 and 1, but less than 0 or bigger than 1 does not give error.
-	// Simply, if RandomRatio >= 1.0, then the delay injection rate will be 100%.
-	RandomRatio float64
 }
 
 // Handler injects error to the given handler.
 func (f *Error) Handler(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !decide(f.RandomRatio) {
-			next.ServeHTTP(w, r)
-			return
-		}
-
 		statusText := f.StatusText
 		if statusText == "" {
 			statusText = "fault: pseudo status text is injected"
@@ -126,20 +115,11 @@ type DelayWithError struct {
 	StatusCode int
 	// StatusText is the injected status text. The same as the one in Error.
 	StatusText string
-	// Random Ratio is the float64 number which is used to decide if delay should be added.
-	// It should be between 0 and 1, but less than 0 or bigger than 1 does not give error.
-	// Simply, if RandomRatio >= 1.0, then the delay injection rate will be 100%.
-	RandomRatio float64
 }
 
 // Handler injects delay and error into the given handler
 func (f *DelayWithError) Handler(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !decide(f.RandomRatio) {
-			next.ServeHTTP(w, r)
-			return
-		}
-
 		statusText := f.StatusText
 		if statusText == "" {
 			statusText = "fault: pseudo status text is injected"
@@ -155,21 +135,11 @@ func (f *DelayWithError) Handler(next http.Handler) http.Handler {
 // Internally it panics, and if it panics in Go, the HTTP request is interrupted and
 // an empty response is returned.
 // While it panics, stacktrace logging aren't shown in the server log.
-type Abort struct {
-	// Random Ratio is the float64 number which is used to decide if delay should be added.
-	// It should be between 0 and 1, but less than 0 or bigger than 1 does not give error.
-	// Simply, if RandomRatio >= 1.0, then the delay injection rate will be 100%.
-	RandomRatio float64
-}
+type Abort struct{}
 
 // Handler aborts the request
 func (f *Abort) Handler(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !decide(f.RandomRatio) {
-			next.ServeHTTP(w, r)
-			return
-		}
-
 		// If it panics with ErrAbortHandler in http handler, the server stacktrace logging will be suppressed.
 		// https://pkg.go.dev/net/http#Handler
 		panic(http.ErrAbortHandler)
@@ -182,20 +152,11 @@ func (f *Abort) Handler(next http.Handler) http.Handler {
 type DelayWithAbort struct {
 	// Duration defines how long the delay should be injected.
 	Duration time.Duration
-	// Random Ratio is the float64 number which is used to decide if delay should be added.
-	// It should be between 0 and 1, but less than 0 or bigger than 1 does not give error.
-	// Simply, if RandomRatio >= 1.0, then the delay injection rate will be 100%.
-	RandomRatio float64
 }
 
 // Handler adds delay and abort in the given handler
 func (f *DelayWithAbort) Handler(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !decide(f.RandomRatio) {
-			next.ServeHTTP(w, r)
-			return
-		}
-
 		time.Sleep(f.Duration)
 		// https://pkg.go.dev/net/http#Handler
 		panic(http.ErrAbortHandler)
